@@ -15,6 +15,14 @@ Install dependencies:
 pip install requests
 ```
 
+## Install
+
+Copy `AuthlyX.py` into your project and import it:
+
+```py
+from AuthlyX import AuthlyX
+```
+
 ## Quick Start
 
 ```py
@@ -24,10 +32,14 @@ AuthlyXApp = AuthlyX(
     ownerId="12345678",
     appName="MYAPP",
     version="1.0.0",
-    secret="qIBFoBJWQH4jaOZr6Sf8BJZyEVnT0LiN4QfGxJGn"
+    secret="your-secret"
 )
 
 AuthlyXApp.Init()
+
+if not AuthlyXApp.response["success"]:
+    print(AuthlyXApp.response["message"])
+    raise SystemExit
 ```
 
 ## Optional Parameters
@@ -39,7 +51,7 @@ AuthlyXApp = AuthlyX(
     ownerId="12345678",
     appName="MYAPP",
     version="1.0.0",
-    secret="qIBFoBJWQH4jaOZr6Sf8BJZyEVnT0LiN4QfGxJGn",
+    secret="your-secret",
     debug=False,
     api="https://example.com/api/v2"
 )
@@ -69,28 +81,145 @@ AuthlyXApp = AuthlyX(
 - `SendChat(message, channelName=None)`
 - `ValidateSession()`
 
-## Authentication Example
+## Init
 
 ```py
-# Username + password
-AuthlyXApp.Login("username", password="password")
+AuthlyXApp.Init()
 
-# License key only
-AuthlyXApp.Login("XXXXX-XXXXX-XXXXX-XXXXX-XXXXX")
-
-# Device login
-AuthlyXApp.Login("YOUR_MOTHERBOARD_ID", deviceType="motherboard")
+if AuthlyXApp.response["success"]:
+    print("Init success")
+else:
+    print(AuthlyXApp.response["message"])
 ```
 
-The SDK routes `Login(...)` automatically:
+## Login (Unified)
 
-- `password + identifier` for username login
-- `identifier only` for license login
-- `deviceType + identifier` for device login
+`Login(...)` is a single entry point that supports:
+
+- username/password login
+- license login
+- device login
+
+```py
+AuthlyXApp.Login("username", password="password")
+
+if AuthlyXApp.response["success"]:
+    print("Login success")
+    print(AuthlyXApp.userData["Username"])
+    print(AuthlyXApp.userData["SubscriptionLevel"])
+else:
+    print(AuthlyXApp.response["message"])
+```
+
+### License Login
+
+```py
+AuthlyXApp.Login("XXXXX-XXXXX-XXXXX-XXXXX-XXXXX")
+
+if AuthlyXApp.response["success"]:
+    print("License login success")
+else:
+    print(AuthlyXApp.response["message"])
+```
+
+### Device Login (Motherboard)
+
+```py
+AuthlyXApp.Login("YOUR_MOTHERBOARD_ID", deviceType="motherboard")
+
+if AuthlyXApp.response["success"]:
+    print("Device login success")
+    print(AuthlyXApp.userData["SubscriptionLevel"])
+else:
+    print(AuthlyXApp.response["message"])
+```
+
+### Device Login (Processor)
+
+```py
+AuthlyXApp.Login("YOUR_PROCESSOR_ID", deviceType="processor")
+
+if AuthlyXApp.response["success"]:
+    print("Device login success")
+else:
+    print(AuthlyXApp.response["message"])
+```
+
+## Register
+
+```py
+AuthlyXApp.Register("new_user", "password", "XXXXX-XXXXX-XXXXX-XXXXX-XXXXX", email="user@example.com")
+
+if AuthlyXApp.response["success"]:
+    print("Registered successfully")
+else:
+    print(AuthlyXApp.response["message"])
+```
+
+## Extend Time
+
+```py
+AuthlyXApp.ExtendTime("username", "XXXXX-XXXXX-XXXXX-XXXXX-XXXXX")
+
+if AuthlyXApp.response["success"]:
+    print("Extended successfully")
+    print("New expiry:", AuthlyXApp.userData["ExpiryDate"])
+else:
+    print(AuthlyXApp.response["message"])
+```
+
+## Change Password
+
+```py
+AuthlyXApp.ChangePassword("old_password", "new_password")
+
+if AuthlyXApp.response["success"]:
+    print("Password changed successfully")
+else:
+    print(AuthlyXApp.response["message"])
+```
+
+## Variables
+
+```py
+AuthlyXApp.SetVariable("theme", "dark")
+print(AuthlyXApp.response["message"])
+
+value = AuthlyXApp.GetVariable("theme")
+if AuthlyXApp.response["success"]:
+    print("theme =", value)
+else:
+    print(AuthlyXApp.response["message"])
+```
+
+## Chats
+
+```py
+AuthlyXApp.SendChat("Hello world", channelName="MAIN")
+print(AuthlyXApp.response["message"])
+
+AuthlyXApp.GetChats("MAIN")
+if AuthlyXApp.response["success"]:
+    for msg in AuthlyXApp.chatMessages["Messages"]:
+        print(f"[{msg['CreatedAt']}] {msg['Username']}: {msg['Message']}")
+else:
+    print(AuthlyXApp.response["message"])
+```
+
+## Validate Session
+
+```py
+AuthlyXApp.ValidateSession()
+
+if AuthlyXApp.response["success"]:
+    print("Session is valid")
+else:
+    print(AuthlyXApp.response["message"])
+```
 
 ## User Data
 
-After a successful login, the SDK populates `AuthlyXApp.userData`, for example:
+After a successful login, the SDK populates `AuthlyXApp.userData`:
 
 - `Username`
 - `Email`
@@ -103,20 +232,4 @@ After a successful login, the SDK populates `AuthlyXApp.userData`, for example:
 - `Hwid` (this is the Windows SID where available)
 - `IpAddress`
 - `RegisteredAt`
-
-## Run The Example
-
-Use your local API during development:
-
-```powershell
-$env:AUTHLYX_API="http://localhost:4000/api/v2"
-python .\main.py
-```
-
-Or run the built-in smoke test:
-
-```powershell
-$env:AUTHLYX_API="http://localhost:4000/api/v2"
-python .\main.py --test-all
-```
 
