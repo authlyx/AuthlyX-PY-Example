@@ -8,6 +8,8 @@ import re
 import time
 import subprocess
 from datetime import datetime, timezone
+import ctypes
+import webbrowser
 
 
 class AuthlyXLogger:
@@ -117,6 +119,7 @@ class Auth:
             "Available": False,
             "LatestVersion": "",
             "DownloadUrl": "",
+            "AutoUpdateEnabled": False,
             "ForceUpdate": False,
             "Changelog": "",
             "ShowReminder": False,
@@ -334,17 +337,141 @@ class Auth:
     def _load_update_data(self, obj):
         if not isinstance(obj, dict):
             return
-        upd = obj.get("update") or {}
+        upd = obj.get("update")
         if not isinstance(upd, dict):
+            if ("auto_update_enabled" in obj) or ("auto_update_download_url" in obj):
+                self.updateData["Available"] = True
+                self.updateData["LatestVersion"] = str(obj.get("server_version") or obj.get("version") or "")
+                self.updateData["AutoUpdateEnabled"] = bool(obj.get("auto_update_enabled"))
+                self.updateData["DownloadUrl"] = str(obj.get("auto_update_download_url") or "")
+                self.updateData["ForceUpdate"] = bool(obj.get("force_update") or False)
             return
         self.updateData["Available"] = bool(upd.get("available") or False)
         self.updateData["LatestVersion"] = str(upd.get("latest_version") or "")
+        self.updateData["AutoUpdateEnabled"] = bool(upd.get("auto_update_enabled"))
         self.updateData["DownloadUrl"] = str(upd.get("download_url") or "")
         self.updateData["ForceUpdate"] = bool(upd.get("force_update") or False)
         self.updateData["Changelog"] = str(upd.get("changelog") or "")
         self.updateData["ShowReminder"] = bool(upd.get("show_reminder") or False)
         self.updateData["ReminderMessage"] = str(upd.get("reminder_message") or "")
         self.updateData["AllowedUntil"] = "" if upd.get("allowed_until") is None else str(upd.get("allowed_until"))
+
+    def _compare_semver(self, a, b):
+        def parts(v):
+            if not v:
+                return [0, 0, 0]
+            s = str(v).strip()
+            if "-" in s:
+                s = s.split("-", 1)[0]
+            out = []
+            for p in s.split(".")[:3]:
+                try:
+                    out.append(int(p))
+                except Exception:
+                    out.append(0)
+            while len(out) < 3:
+                out.append(0)
+            return out
+
+        ap = parts(a)
+        bp = parts(b)
+        return (ap > bp) - (ap < bp)
+
+    def _should_show_update_prompt(self, force_show=False):
+        if not self.updateData.get("Available"):
+            return False
+        if force_show:
+            return True
+        if not self._is_client_outdated():
+            return False
+        if not self._has_whitelisted_update_message():
+            return False
+        return True
+
+    def _is_client_outdated(self):
+        latest = (self.updateData.get("LatestVersion") or "").strip()
+        if not latest:
+            return False
+        return self._compare_semver(self.version, latest) < 0
+
+    def _has_whitelisted_update_message(self):
+        return bool(self.updateData.get("ShowReminder")) or bool((self.updateData.get("AllowedUntil") or "").strip())
+
+    def _is_auto_update_enabled(self):
+        return bool(self.updateData.get("AutoUpdateEnabled"))
+
+    def _format_display_date(self, raw_date):
+        value = (raw_date or "").strip()
+        if not value:
+            return value
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return parsed.strftime("%B %d, %Y").replace(" 0", " ")
+        except Exception:
+            return value
+
+    def _build_whitelisted_update_message(self):
+        allowed_until = (self.updateData.get("AllowedUntil") or "").strip()
+        if allowed_until:
+            base = f"A new version is ready, and you can keep using this build until {self._format_display_date(allowed_until)}."
+        else:
+            base = "A new version is ready, and you can still use this build for now."
+
+        if not self._is_auto_update_enabled():
+            return base
+
+        return base + "\n\nWould you like to download the latest version now?"
+
+    def _show_required_update_console(self):
+        message = (self.response.get("message") or "").strip() or "Please update your app to the latest version."
+        print(message)
+
+        latest = (self.updateData.get("LatestVersion") or "").strip()
+        if latest:
+            print(f"Latest version: {latest}")
+
+        download_url = (self.updateData.get("DownloadUrl") or "").strip()
+        if self._is_auto_update_enabled() and download_url:
+            print("1. Download Latest")
+            print("2. Exit")
+            if sys.stdin and sys.stdin.isatty():
+                choice = input("Select an option (1 or 2): ").strip()
+                if choice == "1":
+                    webbrowser.open(download_url)
+
+    def _prompt_update_if_needed(self, force_show=False):
+        if not self._should_show_update_prompt(force_show=force_show):
+            return
+
+        if force_show:
+            self._show_required_update_console()
+            return
+
+        download_url = (self.updateData.get("DownloadUrl") or "").strip()
+        msg = self._build_whitelisted_update_message()
+
+        # Windows MessageBox (Yes/No or OK), fallback to console prompt
+        try:
+            if os.name == "nt":
+                MB_OK = 0x00000000
+                MB_YESNO = 0x00000004
+                MB_ICONINFORMATION = 0x00000040
+                MB_TOPMOST = 0x00040000
+                IDYES = 6
+
+                flags = (MB_YESNO if self._is_auto_update_enabled() and download_url else MB_OK) | MB_ICONINFORMATION | MB_TOPMOST
+                r = ctypes.windll.user32.MessageBoxW(0, msg, "AuthlyX Update", flags)
+                if self._is_auto_update_enabled() and download_url and r == IDYES:
+                    webbrowser.open(download_url)
+                return
+        except Exception:
+            pass
+
+        print(msg)
+        if self._is_auto_update_enabled() and download_url and sys.stdin and sys.stdin.isatty():
+            choice = input("Download the latest version now? (Y/N): ").strip().lower()
+            if choice == "y":
+                webbrowser.open(download_url)
 
     def _load_chat_data(self, obj):
         if not isinstance(obj, dict):
@@ -462,6 +589,7 @@ class Auth:
             "hash": self.applicationHash or "",
         }
         ok = self._post_json("init", payload)
+        self._prompt_update_if_needed(force_show=(self.response.get("code") == "UPDATE_REQUIRED"))
         if ok and self.sessionId:
             self.initialized = True
         return bool(self.initialized)
@@ -600,12 +728,23 @@ class Auth:
     login = Login
     register = Register
     extend_time = ExtendTime
+    extendTime = ExtendTime
     get_variable = GetVariable
+    getVariable = GetVariable
     set_variable = SetVariable
+    setVariable = SetVariable
     get_chats = GetChats
+    getChats = GetChats
     send_chat = SendChat
+    sendChat = SendChat
     validate_session = ValidateSession
+    validateSession = ValidateSession
     change_password = ChangePassword
+    changePassword = ChangePassword
+    isInitialized = IsInitialized
+    getSessionId = GetSessionId
+    log = Log
+    getCurrentApplicationHash = GetCurrentApplicationHash
 
 
 AuthlyX = Auth

@@ -1,6 +1,6 @@
 import os
 import sys
-from AuthlyX import Auth
+from AuthlyX import AuthlyX
 
 
 def clear():
@@ -132,16 +132,22 @@ def do_validate(auth):
 
 
 def test_all(auth):
-    username = "12"
-    password = "1"
-    license_key = "X6VXY-5VIVE-PT6SY-O8FNX-AEDJL"
-    motherboard = "PDPCF001X4YJ2Q"
-    processor = "BFEBFBFF000306A9"
-    var_key = "hehe"
-    var_value = "me"
+    username = os.environ.get("AUTHLYX_USERNAME", "").strip()
+    password = os.environ.get("AUTHLYX_PASSWORD", "").strip()
+    license_key = os.environ.get("AUTHLYX_LICENSE_KEY", "").strip()
+    motherboard = os.environ.get("AUTHLYX_MOTHERBOARD_ID", "").strip()
+    processor = os.environ.get("AUTHLYX_PROCESSOR_ID", "").strip()
+    var_key = os.environ.get("AUTHLYX_VARIABLE_KEY", "theme").strip() or "theme"
+    var_value = os.environ.get("AUTHLYX_VARIABLE_VALUE", "dark").strip() or "dark"
+
+    if not username or not password:
+        print("Set AUTHLYX_USERNAME and AUTHLYX_PASSWORD to run the authenticated test flow.")
+        return
 
     auth.Login(username, password=password)
     show_result("Login", auth)
+    if not auth.response.get("success"):
+        return
     show_user(auth)
 
     auth.SetVariable(var_key, var_value)
@@ -156,32 +162,38 @@ def test_all(auth):
     auth.GetChats(auth.appName)
     show_result("Get Chats", auth)
 
-    auth.ExtendTime(username, license_key)
-    show_result("Extend", auth)
+    if license_key:
+        auth.ExtendTime(username, license_key)
+        show_result("Extend", auth)
 
-    auth.Login(license_key)
-    show_result("License Login", auth)
-    show_user(auth)
+        auth.Login(license_key)
+        show_result("License Login", auth)
+        if auth.response.get("success"):
+            show_user(auth)
 
-    auth.Login(motherboard, deviceType="motherboard")
-    show_result("Device Login (motherboard)", auth)
-    show_user(auth)
+    if motherboard:
+        auth.Login(motherboard, deviceType="motherboard")
+        show_result("Device Login (motherboard)", auth)
+        if auth.response.get("success"):
+            show_user(auth)
 
-    auth.Login(processor, deviceType="processor")
-    show_result("Device Login (processor)", auth)
-    show_user(auth)
+    if processor:
+        auth.Login(processor, deviceType="processor")
+        show_result("Device Login (processor)", auth)
+        if auth.response.get("success"):
+            show_user(auth)
 
     auth.ValidateSession()
     show_result("Validate Session", auth)
 
 
 def main():
-    api = os.environ.get("AUTHLYX_API") or "http://localhost:4000/api/v2"
-    auth = Auth(
-        ownerId="12345678",
-        appName="HI",
-        version="1.3",
-        secret="qIBFoBJWQH4jaOZr6Sf8BJZyEVnT0LiN4QfRxJGn",
+    api = os.environ.get("AUTHLYX_API") or "https://authly.cc/api/v2"
+    auth = AuthlyX(
+        ownerId=os.environ.get("AUTHLYX_OWNER_ID") or "b49d11af8c42",
+        appName=os.environ.get("AUTHLYX_APP_NAME") or "TEST",
+        version=os.environ.get("AUTHLYX_VERSION") or "1.3",
+        secret=os.environ.get("AUTHLYX_SECRET") or "1L0edLKqHlFv0AL3NIQ7uPpikN2ECr7aZSHrNWMo",
         api=api,
     )
 
