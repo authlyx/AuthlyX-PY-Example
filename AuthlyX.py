@@ -1,3 +1,4 @@
+# AuthlyX SDK Version 2.1
 import requests
 import json
 import uuid
@@ -10,6 +11,10 @@ import subprocess
 from datetime import datetime, timezone
 import ctypes
 import webbrowser
+import base64
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.serialization import load_pem_public_key
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 
 class AuthlyXLogger:
@@ -70,13 +75,16 @@ class AuthlyXLogger:
 class Auth:
     DefaultBaseUrl = "https://authly.cc/api/v2"
     IpLookupUrl = "https://api.ipify.org"
+    DefaultServerPublicKeyPem = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAgX5lXPhkadeQozyudzTxDXopdJxYexD5qZ0yEq9UOMU=\n-----END PUBLIC KEY-----"
 
-    def __init__(self, ownerId, appName, version, secret, debug=True, api=None):
+    def __init__(self, ownerId, appName, version, secret, debug=True, api=None, serverPublicKeyPem=None, requireSignedResponses=False):
         self.ownerId = ownerId or ""
         self.appName = appName or ""
         self.version = version or ""
         self.secret = secret or ""
         self.baseUrl = self._normalize_base_url(api or Auth.DefaultBaseUrl)
+        self.serverPublicKeyPem = (serverPublicKeyPem or Auth.DefaultServerPublicKeyPem).replace("\\n", "\n")
+        self.requireSignedResponses = requireSignedResponses is True
         self.loggingEnabled = True if debug is None else bool(debug)
 
         AuthlyXLogger.AppName = self.appName or "AuthlyX"
@@ -251,6 +259,23 @@ class Auth:
         if resp_nonce and resp_nonce != nonce:
             return False, "AUTH_REQUEST_MISMATCH", "Response nonce does not match the original request.", sig_kid
         return True, "", "", sig_kid
+
+    def _verify_signed_response(self, headers, request_id, nonce, canonical_body):
+        signature = headers.get("x-v2-signature") or headers.get("x-auth-signature") or ""
+        signature_ts = headers.get("x-v2-signature-ts") or ""
+        if not signature or not signature_ts:
+            return not self.requireSignedResponses
+        if not self.serverPublicKeyPem:
+            return not self.requireSignedResponses
+        try:
+            public_key = load_pem_public_key(self.serverPublicKeyPem.encode("utf-8"))
+            if not isinstance(public_key, Ed25519PublicKey):
+                return False
+            payload = f"{signature_ts}\n{request_id}\n{nonce}\n{canonical_body}".encode("utf-8")
+            public_key.verify(base64.b64decode(signature), payload)
+            return True
+        except (InvalidSignature, Exception):
+            return False
 
     def _compute_days_left(self, expiry):
         try:
@@ -547,6 +572,10 @@ class Auth:
             self.response["signature_kid"] = kid or ""
             if not ok:
                 self._set_failure(code, msg, raw, r.status_code)
+                return False
+
+            if not self._verify_signed_response(lowered, request_id, nonce, self._canonical_json(obj)):
+                self._set_failure("AUTH_INVALID_SIGNATURE", "Response signature verification failed.", raw, r.status_code)
                 return False
 
             self.response["success"] = bool(obj.get("success") if "success" in obj else (200 <= r.status_code < 300))
