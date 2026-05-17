@@ -77,7 +77,7 @@ class Auth:
     IpLookupUrl = "https://api.ipify.org"
     DefaultServerPublicKeyPem = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAgX5lXPhkadeQozyudzTxDXopdJxYexD5qZ0yEq9UOMU=\n-----END PUBLIC KEY-----"
 
-    def __init__(self, ownerId, appName, version, secret, debug=True, api=None, serverPublicKeyPem=None, requireSignedResponses=False):
+    def __init__(self, ownerId, appName, version, secret, debug=True, api=None, serverPublicKeyPem=None, requireSignedResponses=True):
         self.ownerId = ownerId or ""
         self.appName = appName or ""
         self.version = version or ""
