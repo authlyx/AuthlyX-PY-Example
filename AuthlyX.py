@@ -1,4 +1,4 @@
-# AuthlyX SDK Version 2.1
+# AuthlyX SDK Version 2.2
 import requests
 import json
 import uuid
@@ -8,6 +8,9 @@ import sys
 import re
 import time
 import subprocess
+import socket
+import threading
+import ssl
 from datetime import datetime, timezone
 import ctypes
 import webbrowser
@@ -65,6 +68,11 @@ class AuthlyXLogger:
             root = os.path.join(program_data, "AuthlyX", app)
             os.makedirs(root, exist_ok=True)
             log_path = os.path.join(root, f"{datetime.now(timezone.utc):%Y_%m_%d}.log")
+            if os.path.exists(log_path) and os.path.getsize(log_path) > 5 * 1024 * 1024:
+                old_path = os.path.join(root, f"{datetime.now(timezone.utc):%Y_%m_%d}_old.log")
+                if os.path.exists(old_path):
+                    os.remove(old_path)
+                os.rename(log_path, old_path)
             line = f"[{datetime.now(timezone.utc):%H:%M:%S}] {AuthlyXLogger._mask_sensitive(s)}\n"
             with open(log_path, "a", encoding="utf-8") as f:
                 f.write(line)
@@ -77,14 +85,17 @@ class Auth:
     IpLookupUrl = "https://api.ipify.org"
     DefaultServerPublicKeyPem = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAgX5lXPhkadeQozyudzTxDXopdJxYexD5qZ0yEq9UOMU=\n-----END PUBLIC KEY-----"
 
-    def __init__(self, ownerId, appName, version, secret, debug=True, api=None, serverPublicKeyPem=None, requireSignedResponses=True):
+    def __init__(self, ownerId, appName, version, secret, debug=True, api=None, anti_debug=True):
+        self.antiDebug = anti_debug
+        if self.antiDebug:
+            self._check_debugger()
         self.ownerId = ownerId or ""
         self.appName = appName or ""
         self.version = version or ""
         self.secret = secret or ""
         self.baseUrl = self._normalize_base_url(api or Auth.DefaultBaseUrl)
-        self.serverPublicKeyPem = (serverPublicKeyPem or Auth.DefaultServerPublicKeyPem).replace("\\n", "\n")
-        self.requireSignedResponses = requireSignedResponses is True
+        self.serverPublicKeyPem = Auth.DefaultServerPublicKeyPem.replace("\\n", "\n")
+        self.requireSignedResponses = True
         self.loggingEnabled = True if debug is None else bool(debug)
 
         AuthlyXLogger.AppName = self.appName or "AuthlyX"
@@ -236,7 +247,7 @@ class Auth:
         if self.cachedPublicIp and now < self.cachedPublicIpExpiresAt:
             return self.cachedPublicIp
         try:
-            r = requests.get(Auth.IpLookupUrl, timeout=10)
+            r = requests.get(Auth.IpLookupUrl, timeout=10, proxies={})
             ip = (r.text or "").strip()
             if ip:
                 self.cachedPublicIp = ip
@@ -317,6 +328,10 @@ class Auth:
 
         if isinstance(lic, dict) and lic:
             self.userData["LicenseKey"] = str(lic.get("license_key") or self.userData["LicenseKey"] or "")
+            if not self.userData["Username"]:
+                self.userData["Username"] = str(lic.get("license_key") or "")
+            if not self.userData["Email"]:
+                self.userData["Email"] = str(lic.get("email") or "")
             if not self.userData["Subscription"]:
                 self.userData["Subscription"] = str(lic.get("subscription") or "")
             lvl = lic.get("subscription_level")
@@ -324,6 +339,12 @@ class Auth:
                 self.userData["SubscriptionLevel"] = str(lvl)
             if not self.userData["ExpiryDate"]:
                 self.userData["ExpiryDate"] = str(lic.get("expiry_date") or "")
+            if not self.userData["LastLogin"]:
+                self.userData["LastLogin"] = str(lic.get("last_login") or "")
+            if not self.userData["Hwid"]:
+                self.userData["Hwid"] = str(lic.get("hwid") or lic.get("sid") or "")
+            if not self.userData["IpAddress"]:
+                self.userData["IpAddress"] = str(lic.get("ip_address") or "")
 
         if isinstance(dev, dict) and dev:
             if not self.userData["Subscription"]:
@@ -525,7 +546,76 @@ class Auth:
         self.chatMessages["NextCursor"] = str(data.get("next_cursor") or "")
         self.chatMessages["HasMore"] = bool(data.get("has_more") or False)
 
+    def _check_debugger(self):
+        if self.antiDebug and sys.gettrace() is not None:
+            os._exit(1)
+
+    def _is_private_ip(self, ip_str):
+        try:
+            parts = list(map(int, ip_str.split(".")))
+            if len(parts) != 4:
+                return False
+            if parts[0] == 127:
+                return True
+            if parts[0] == 10:
+                return True
+            if parts[0] == 172 and 16 <= parts[1] <= 31:
+                return True
+            if parts[0] == 192 and parts[1] == 168:
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _is_domain_hijacked(self, domain):
+        try:
+            results = socket.getaddrinfo(domain, None)
+            for res in results:
+                ip = res[4][0]
+                if self._is_private_ip(ip):
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _start_integrity_heartbeat(self):
+        def _tick():
+            self._check_debugger()
+            t = threading.Timer(60.0, _tick)
+            t.daemon = True
+            t.start()
+        t = threading.Timer(60.0, _tick)
+        t.daemon = True
+        t.start()
+
+    def _start_exe_integrity_check(self):
+        def _tick():
+            try:
+                path = sys.executable
+                if not path or not os.path.exists(path):
+                    path = os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0] else ""
+                if path and os.path.exists(path):
+                    h = hashlib.sha256()
+                    with open(path, "rb") as f:
+                        while True:
+                            b = f.read(1024 * 1024)
+                            if not b:
+                                break
+                            h.update(b)
+                    if self.antiDebug and h.hexdigest() != self._original_hash:
+                        os._exit(1)
+            except Exception:
+                pass
+            t = threading.Timer(120.0, _tick)
+            t.daemon = True
+            t.start()
+        t = threading.Timer(120.0, _tick)
+        t.daemon = True
+        t.start()
+
     def _post_json(self, endpoint, payload):
+        if self.antiDebug and self._is_domain_hijacked("authly.cc"):
+            os._exit(1)
         self._reset_response()
         if payload is None or not isinstance(payload, dict):
             return self._set_failure("INVALID_PAYLOAD", "Payload cannot be null.")
@@ -548,8 +638,26 @@ class Auth:
             "x-auth-timestamp": str(ts),
         }
 
+        max_attempts = 3
+        retry_delays = [1.0, 2.0]
+
+        for attempt in range(1, max_attempts + 1):
+            session = requests.Session()
+            try:
+                r = session.post(url, data=body.encode("utf-8"), headers=headers, timeout=30, proxies={})
+                break
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as ex:
+                AuthlyXLogger.Log(f"[SDK] Network error on attempt {attempt}: {str(ex)}")
+                if attempt < max_attempts:
+                    time.sleep(retry_delays[attempt - 1])
+                    continue
+                return self._set_failure("NETWORK_ERROR", f"Network error after {max_attempts} attempts: {str(ex)}")
+            except requests.exceptions.RequestException as ex:
+                return self._set_failure("NETWORK_ERROR", f"Network error: {str(ex)}")
+        else:
+            return self._set_failure("NETWORK_ERROR", "Request failed after all retry attempts.")
+
         try:
-            r = requests.post(url, data=body.encode("utf-8"), headers=headers, timeout=30)
             raw = r.text or ""
             AuthlyXLogger.Log(f"[SDK][RESPONSE] {r.status_code} {raw}")
 
@@ -594,10 +702,6 @@ class Auth:
             self._load_chat_data(obj)
 
             return bool(self.response["success"])
-        except requests.exceptions.Timeout as ex:
-            return self._set_failure("TIMEOUT", f"Request timed out: {str(ex)}")
-        except requests.exceptions.RequestException as ex:
-            return self._set_failure("NETWORK_ERROR", f"Network error: {str(ex)}")
         except Exception as ex:
             return self._set_failure("SDK_ERROR", f"Unexpected SDK error: {str(ex)}")
 
@@ -621,6 +725,9 @@ class Auth:
         self._prompt_update_if_needed(force_show=(self.response.get("code") == "UPDATE_REQUIRED"))
         if ok and self.sessionId:
             self.initialized = True
+            self._original_hash = self.applicationHash
+            self._start_integrity_heartbeat()
+            self._start_exe_integrity_check()
         return bool(self.initialized)
 
     def Login(self, identifier, password=None, deviceType=None):
@@ -640,7 +747,10 @@ class Auth:
             "sid": self._get_system_identifier(),
             "ip": self._get_public_ip(),
         }
-        return self._post_json("login", payload)
+        ok = self._post_json("login", payload)
+        if ok:
+            self.CheckBlacklist()
+        return ok
 
     def LicenseLogin(self, licenseKey):
         if not self._ensure_initialized():
@@ -651,7 +761,10 @@ class Auth:
             "sid": self._get_system_identifier(),
             "ip": self._get_public_ip(),
         }
-        return self._post_json("licenses", payload)
+        ok = self._post_json("licenses", payload)
+        if ok:
+            self.CheckBlacklist()
+        return ok
 
     def DeviceLogin(self, deviceType, deviceId):
         if not self._ensure_initialized():
@@ -743,6 +856,16 @@ class Auth:
             return self._set_failure("INVALID_SESSION", "No active session. Please login first.")
         payload = {"session_id": self.sessionId}
         return self._post_json("validate-session", payload)
+
+    def CheckBlacklist(self):
+        if not self._ensure_initialized():
+            return False
+        payload = {
+            "session_id": self.sessionId,
+            "hwid": self._get_system_identifier(),
+            "ip": self._get_public_ip(),
+        }
+        return self._post_json("blacklist/check", payload)
 
     def IsInitialized(self):
         return bool(self.initialized)
