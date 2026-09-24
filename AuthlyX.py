@@ -1,4 +1,4 @@
-# AuthlyX SDK Version 2.2
+# AuthlyX SDK V2.4
 import requests
 import json
 import uuid
@@ -18,6 +18,82 @@ import base64
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+
+
+
+from urllib3.connection import HTTPSConnection
+from urllib3.connectionpool import HTTPSConnectionPool
+from urllib3.contrib.pyopenssl import PyOpenSSLContext
+from requests.adapters import HTTPAdapter
+from OpenSSL import crypto as openssl_crypto
+
+_TLS_PINS = frozenset((
+    "1DFC1605FBAD358D8BC844F76D15203FAC9CA5C1A79FD4857FFAF2864FBEBF96",
+    "76B27B80A58027DC3CF1DA68DAC17010ED93997D0B603E2FADBE85012493B5A7",
+))
+
+
+class _PinnedHTTPSConnection(HTTPSConnection):
+    def connect(self):
+        host = (self.server_hostname or self.host).lower().rstrip(".")
+        if host != "authly.cc":
+            return super().connect()
+        if self.cert_reqs not in (ssl.CERT_REQUIRED, "CERT_REQUIRED"):
+            raise ssl.SSLError("AuthlyX requires normal TLS certificate validation")
+
+
+
+        if isinstance(self.ssl_context, ssl.SSLContext):
+            self._pinning_ca_der = self.ssl_context.get_ca_certs(binary_form=True)
+        self.ssl_context = PyOpenSSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        self.ssl_context.verify_mode = ssl.CERT_REQUIRED
+        store = self.ssl_context._ctx.get_cert_store()
+        for cert in getattr(self, "_pinning_ca_der", ()):
+            store.add_cert(openssl_crypto.load_certificate(openssl_crypto.FILETYPE_ASN1, cert))
+        self.assert_hostname = host
+        try:
+            super().connect()
+            if not self.is_verified:
+                raise ssl.SSLError("AuthlyX TLS certificate validation failed")
+            connection = getattr(self.sock, "connection", None)
+            if connection is None:
+                raise ssl.SSLError("AuthlyX TLS peer chain unavailable")
+            chain = connection.get_verified_chain()
+            if not chain or not any(
+                hashlib.sha256(openssl_crypto.dump_certificate(openssl_crypto.FILETYPE_ASN1, cert))
+                .hexdigest().upper() in _TLS_PINS for cert in chain
+            ):
+                raise ssl.SSLError("AuthlyX TLS certificate chain does not match a trusted pin")
+        except Exception:
+            self.close()
+            raise
+
+
+class _PinnedHTTPSPool(HTTPSConnectionPool):
+    ConnectionCls = _PinnedHTTPSConnection
+
+
+class _PinnedHTTPAdapter(HTTPAdapter):
+    @staticmethod
+    def _configure_manager(manager):
+        manager.pool_classes_by_scheme = dict(manager.pool_classes_by_scheme)
+        manager.pool_classes_by_scheme["https"] = _PinnedHTTPSPool
+
+    def init_poolmanager(self, *args, **kwargs):
+        super().init_poolmanager(*args, **kwargs)
+        self._configure_manager(self.poolmanager)
+
+    def proxy_manager_for(self, *args, **kwargs):
+        manager = super().proxy_manager_for(*args, **kwargs)
+        self._configure_manager(manager)
+        return manager
+
+
+def _pinned_session():
+    session = requests.Session()
+    session.mount("https://", _PinnedHTTPAdapter())
+    return session
 
 
 class AuthlyXLogger:
@@ -96,6 +172,7 @@ class Auth:
         self.baseUrl = self._normalize_base_url(api or Auth.DefaultBaseUrl)
         self.serverPublicKeyPem = Auth.DefaultServerPublicKeyPem.replace("\\n", "\n")
         self.requireSignedResponses = True
+        self._http = _pinned_session()
         self.loggingEnabled = True if debug is None else bool(debug)
 
         AuthlyXLogger.AppName = self.appName or "AuthlyX"
@@ -341,6 +418,8 @@ class Auth:
                 self.userData["ExpiryDate"] = str(lic.get("expiry_date") or "")
             if not self.userData["LastLogin"]:
                 self.userData["LastLogin"] = str(lic.get("last_login") or "")
+            if not self.userData["RegisteredAt"]:
+                self.userData["RegisteredAt"] = str(lic.get("registered_at") or lic.get("date_created") or "")
             if not self.userData["Hwid"]:
                 self.userData["Hwid"] = str(lic.get("hwid") or lic.get("sid") or "")
             if not self.userData["IpAddress"]:
@@ -368,7 +447,21 @@ class Auth:
         if not self.userData["IpAddress"]:
             self.userData["IpAddress"] = self._get_public_ip()
 
-        self.userData["DaysLeft"] = self._compute_days_left(self.userData["ExpiryDate"])
+
+
+
+        raw_days_left = obj.get("days_left")
+        if raw_days_left is None and isinstance(user, dict):
+            raw_days_left = user.get("days_left")
+        if raw_days_left is None and isinstance(lic, dict):
+            raw_days_left = lic.get("days_left")
+        if raw_days_left is None and isinstance(dev, dict):
+            raw_days_left = dev.get("days_left")
+
+        try:
+            self.userData["DaysLeft"] = int(raw_days_left) if raw_days_left is not None else self._compute_days_left(self.userData["ExpiryDate"])
+        except (TypeError, ValueError):
+            self.userData["DaysLeft"] = self._compute_days_left(self.userData["ExpiryDate"])
 
     def _load_variable_data(self, obj):
         if not isinstance(obj, dict):
@@ -496,7 +589,7 @@ class Auth:
         download_url = (self.updateData.get("DownloadUrl") or "").strip()
         msg = self._build_whitelisted_update_message()
 
-        # Windows MessageBox (Yes/No or OK), fallback to console prompt
+
         try:
             if os.name == "nt":
                 MB_OK = 0x00000000
@@ -642,7 +735,7 @@ class Auth:
         retry_delays = [1.0, 2.0]
 
         for attempt in range(1, max_attempts + 1):
-            session = requests.Session()
+            session = self._http
             try:
                 r = session.post(url, data=body.encode("utf-8"), headers=headers, timeout=30, proxies={})
                 break
@@ -720,6 +813,7 @@ class Auth:
             "version": self.version,
             "secret": self.secret,
             "hash": self.applicationHash or "",
+            "ip": self._get_public_ip(),
         }
         ok = self._post_json("init", payload)
         self._prompt_update_if_needed(force_show=(self.response.get("code") == "UPDATE_REQUIRED"))

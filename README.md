@@ -8,6 +8,13 @@ This folder includes the SDK in `AuthlyX.py` and a runnable example in `main.py`
 
 - Python `3.8` or later
 - `requests`
+- `cryptography`, `pyOpenSSL>=24.0.0`, and `urllib3>=1.26.18,<3` (install `requirements.txt`)
+
+HTTPS connections to `authly.cc` validate the normal CA chain and hostname, then
+check full DER SHA-256 CA certificate pins before sending any HTTP data. A
+connection-local PyOpenSSL context exposes the verified chain on Python 3.8+;
+the SDK does not globally replace urllib3's TLS backend. Other HTTPS hosts use
+normal requests validation. There is no leaf-only or fail-open fallback.
 
 ## Quick Start
 
